@@ -8,6 +8,9 @@ all: display test before after
 display: display.c device.c
 	$(CC) $(CFLAGS) -o display display.c device.c
 
+lol: lol.c device.c
+	$(CC) $(CFLAGS) -o lol lol.c device.c
+
 test: main.c test.c CuTest.c fileSystem.c device.c
 	$(CC) $(CFLAGS) -o test main.c test.c CuTest.c fileSystem.c device.c 
 
