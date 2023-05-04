@@ -7,12 +7,11 @@
  * Complete this file.
  */
 
-#include <stdio.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
 #include "device.h"
-#include "fileSystem.h"
 
 typedef struct {
     int blockNum; // 2 bytes
@@ -160,7 +159,7 @@ bool pointerEquals(blockPointer pointer1, blockPointer pointer2) {
 }
 
 
-int initSysinfo(sysinfo *system) {
+int loadSysinfo(sysinfo *system) {
 	unsigned char freeBlock[2];
 	unsigned char h[3];
 	unsigned char c[3];
@@ -184,7 +183,7 @@ int initSysinfo(sysinfo *system) {
 
 int incrementFree() {
 	sysinfo system;
-	initSysinfo(&system);
+	loadSysinfo(&system);
 
 	system.freeBlock += 1;
 
@@ -195,40 +194,9 @@ int incrementFree() {
 }
 
 
-int format(char *volumeName) {
-	int blocks = numBlocks();
-
-	// Normal Block
-	unsigned char cblock[64] = {'\x0'};
-
-	unsigned char head[3];
-	unsigned char current[3];
-	unsigned char freeBlock[2];
-
-	// Normal Block Init
-	for (int i = 0; i < blocks; i++) {
-		editBlock(i, cblock, 0, sizeof(cblock));
-	}
-	
-	// System Block Init
-	toHex(3, freeBlock, 2);
-	editBlock(0, freeBlock, 0, sizeof(freeBlock));
-
-	createRawPointer(2, 0, head);
-	editBlock(0, head, 2, sizeof(head));
-
-	createRawPointer(2, 0, current);
-	editBlock(0, current, 5, sizeof(current));
-
-	editBlock(1, (unsigned char*)volumeName, 0, strlen(volumeName));
-
-	initRoot();
-	return 0;
-}
-
 int initRoot() {
 	unsigned char data[17];
-    unsigned char name[8] = "/";
+    unsigned char name[8] = "\0";
     unsigned char next[3];
 	unsigned char content[3];
 	unsigned char parent[3];
@@ -246,21 +214,25 @@ int initRoot() {
 	return 0;
 }
 
-int allocDir(dir *direc) {
+int allocDir(blockPointer current, dir *direc) {
 	sysinfo system;
-	initSysinfo(&system);
+	loadSysinfo(&system);
+	unsigned char content[3];
 
 	blockPointer pointer;
-	
-	createPointer(system.freeBlock, 0, &pointer);
+	createRawPointer(system.freeBlock, 0, &content);
+	convertRawPointer(content, &pointer);
+	incrementFree();
+
 	direc->content = pointer;
+	editBlock(current.blockNum, content, current.address + 11, 3);
+
+	return 0;
 }
 
 int loadDir(blockPointer pointer, dir *direc) {
 	unsigned char data[17];
-	print_pointer(pointer);
 	readBlock(pointer.blockNum, data, pointer.address, 17);
-	unsigned char name[8];
 	unsigned char rnext[3];
 	unsigned char rcontent[3];
 	unsigned char rparent[3];
@@ -281,11 +253,16 @@ int loadDir(blockPointer pointer, dir *direc) {
 	direc->next = next;
 	direc->content = content;
 	direc->parent = parent;
+
+	if (strlen(direc->name) == 0) {
+		return -1;
+	}
+	return 0;
 }
 
 int updateCurrent(blockPointer pointer) {
 	sysinfo system;
-	initSysinfo(&system);
+	loadSysinfo(&system);
 	unsigned char location[3];
 	createRawPointer(pointer.blockNum, pointer.address, location);
 	editBlock(5, location, 0, 3);
@@ -302,13 +279,20 @@ bool checkDir(unsigned char *dirName, blockPointer parent, dir currentDir) {
 
 int initDir(blockPointer current, unsigned char *name, blockPointer parent) {
 	sysinfo system;
-	initSysinfo(&system);
+	loadSysinfo(&system);
+
+	dir direc;
+	loadDir(current, &direc);
+	if (strcmp(direc.name, name) == 0 && pointerEquals(parent, direc.parent)) {
+		return 0;
+	}
 
 	unsigned char data[17];
 	unsigned char rnext[3];
 	unsigned char rcontent[3];
 	unsigned char rparent[3];
 
+	createRawPointer(0, 0, rnext);
 	createRawPointer(0, 0, rcontent);
 	createRawPointer(parent.blockNum, parent.address, rparent);
 
@@ -321,16 +305,62 @@ int initDir(blockPointer current, unsigned char *name, blockPointer parent) {
 		memcpy(&data[8], rnext, sizeof(unsigned char) * 3);
 	} else {
 		createRawPointer(system.freeBlock, 0, rnext);
-		incrementFree();
 		memcpy(&data[8], rnext, sizeof(unsigned char) * 3);
+		incrementFree();
 	}
+
 	editBlock(current.blockNum, data, current.address, 17);
 	return 0;
 }
 
+int loadFile(blockPointer pointer, file *cfile) {
+
+	unsigned char data[13];
+	readBlock(pointer.blockNum, data, pointer.address, 13);
+	unsigned char name[8];
+	unsigned char rnext[3];
+	unsigned char rsize[2];
+
+	blockPointer next;
+
+	memcpy(cfile->name, &data[0], sizeof(unsigned char) * 8);
+	memcpy(rnext, &data[8], sizeof(unsigned char) * 3);
+	memcpy(rsize, &data[11], sizeof(unsigned char) * 2);
+
+	convertRawPointer(rnext, &next);
+
+	cfile->next = next;
+	cfile->size = fromHex(rsize, 2);
+
+	return 0;
+}
+
+
 int initFile(blockPointer current, unsigned char *name) {
 	sysinfo system;
-	initSysinfo(&system);
+	loadSysinfo(&system);
+
+	file cfile;
+	blockPointer def;
+	unsigned char rnext[3];
+	createPointer(0, 0, &def);
+	loadFile(current, &cfile);
+
+	while (strlen(cfile.name) != 0) {
+		if (strcmp(cfile.name, name) == 0) {
+			return 1;
+		}
+		if (pointerEquals(cfile.next, def)) {
+			createRawPointer(system.freeBlock, 0, rnext);
+			editBlock(current.blockNum, rnext, current.address + 8, 3);
+			convertRawPointer(rnext, &current);
+			incrementFree();
+			break;
+		} else {
+			current = cfile.next;
+		}
+		loadFile(current, &cfile);
+	} 
 
 	unsigned char data[13];
 	unsigned char next[3];
@@ -347,8 +377,34 @@ int initFile(blockPointer current, unsigned char *name) {
 	return 0;
 }
 
+int split_string(char *str, char *delim, char ***paths, int *numPaths) {
+    *paths = (char **)malloc(1024 * sizeof(char *));
 
+    int len = strlen(str);
+    char *ptr = str;
+    char *end = str + len;
+    int i = 0;
 
+    while (ptr < end) {
+        char *path_end = strstr(ptr, delim);
+        if (path_end == NULL) {
+            path_end = end;
+        }
+        int path_len = path_end - ptr;
+
+        (*paths)[i] = (char *)malloc((path_len + 1) * sizeof(char));
+
+        strncpy((*paths)[i], ptr, path_len);
+
+        (*paths)[i][path_len] = '\0';
+		
+        ptr = path_end + strlen(delim);
+        i++;
+    }
+
+    *numPaths = i;
+    return 0;
+}
 
 /* The file system error number. */
 int file_errno = 0;
@@ -387,8 +443,11 @@ int format(char *volumeName) {
 	editBlock(0, current, 5, sizeof(current));
 
 	editBlock(1, (unsigned char*)volumeName, 0, strlen(volumeName));
+
+	initRoot();
 	return 0;
 }
+
 
 
 /*
@@ -397,6 +456,7 @@ int format(char *volumeName) {
  */
 int volumeName(char *result) {
 	readBlock(1, result, 0, 64);
+	return 0;
 }
 
 /*
@@ -415,8 +475,45 @@ int volumeName(char *result) {
  * Returns 0 if no problem or -1 if the call failed.
  */
 int create(char *pathName) {
+	sysinfo system;
+	loadSysinfo(&system);
+
+	blockPointer current;
+	blockPointer previous;
+	blockPointer def;
+	dir currentDir;
+
+	createPointer(0, 0, &def);
+	current = system.head;
+	previous = def;
+	loadDir(current, &currentDir);
+
+    char *delim = "/";
+    char **paths;
+    int numPaths;
+
+    if (split_string(pathName, delim, &paths, &numPaths) == 0) {
+        for (int i = 1; i < numPaths; i++) {
+			if (i == numPaths - 1) {
+				if (pointerEquals(currentDir.content, def)) {
+					allocDir(current, &currentDir);
+				}
+				loadDir(current, &currentDir);
+				initFile(currentDir.content, paths[i]);
+			} else {
+				previous = current;
+				current = currentDir.next;
+				initDir(current, paths[i], previous);
+				loadDir(current, &currentDir);
+			}
+            free(paths[i]);
+        }
+        free(paths);
+    }
 	return 0;
 }
+
+
 
 /*
  * Returns a list of all files in the named directory.
@@ -433,6 +530,54 @@ file2	0
  * The directoryName is a full pathname.
  */
 void list(char *result, char *directoryName) {
+	sysinfo system;
+	loadSysinfo(&system);
+
+	blockPointer current;
+	blockPointer previous;
+	blockPointer def;
+	dir currentDir;
+	file currentFile;
+
+	createPointer(0, 0, &def);
+	current = system.head;
+	previous = def;
+	loadDir(current, &currentDir);
+
+    char *delim = "/";
+    char **paths;
+    int numPaths;
+
+    if (split_string(directoryName, delim, &paths, &numPaths) == 0) {
+        for (int i = 0; i < numPaths; i++) {
+			if (i == numPaths - 1) {
+				loadDir(current, &currentDir);
+				unsigned char damn[17];
+				readBlock(2, damn, 0, 17);
+				
+				sprintf(result, "/%s:\n", currentDir.name);
+				loadFile(currentDir.content, &currentFile);
+
+				if (strlen(currentFile.name) != 0) {
+					sprintf(result + strlen(result), "%s:\t%d\n",currentFile.name, currentFile.size);
+				}
+				
+				while(!pointerEquals(currentFile.next, def)) {
+					loadFile(currentFile.next, &currentFile);
+					sprintf(result + strlen(result), "%s:\t%d\n",currentFile.name, currentFile.size);
+				}
+			} else {
+				if(!pointerEquals(currentDir.next, def)) {
+					previous = current;
+					current = currentDir.next;
+					initDir(current, paths[i], previous);
+					loadDir(current, &currentDir);
+				}
+			}
+            free(paths[i]);
+        }
+        free(paths);
+    }
 }
 
 /*
